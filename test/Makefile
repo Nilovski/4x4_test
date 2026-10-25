@@ -8,13 +8,18 @@ TOPLEVEL_LANG ?= verilog
 SRC_DIR = $(PWD)/../src
 PROJECT_SOURCES = \
     tt_um_sahpar_gemm4x4.sv \
-    rx_byte_interface.sv \
-    tx_byte_interface.sv \
-    cmd_decoder.sv \
-    gemm_top.sv \
-    systolic_array.sv \
-    pe.sv \
-    mac_unit.sv
+    interface/rx_byte_interface.sv \
+    interface/tx_byte_interface.sv \
+    interface/command_decoder.sv \
+    interface/status_register.sv \
+    memory/operand_buffer.sv \
+    compute/bf16_multiplier.sv \
+    compute/bf16_adder.sv \
+    compute/systolic_pe.sv \
+    compute/systolic_array.sv \
+    compute/systolic_scheduler.sv \
+    control/gemm_controller.sv \
+    output/result_mux.sv
 
 ifneq ($(GATES),yes)
 
