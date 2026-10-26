@@ -112,6 +112,23 @@ async def test_accumulate(dut):
 
 
 @cocotb.test()
+async def test_rerun_without_reload(dut):
+    """The prep unit's lanes return to order after a feed, so GEMM can rerun."""
+    await reset(dut)
+    random.seed(4)
+    a, b = rand_mat(), rand_mat()
+    await run(dut, a, b)
+    first = await read_c(dut)
+    await send_byte(dut, OP_CLEAR_GEMM)
+    await wait_idle(dut)
+    assert await read_c(dut) == first, "clear rerun changed the result"
+    await send_byte(dut, OP_GEMM)
+    await wait_idle(dut)
+    a2 = [a[i * K + t % K] for i in range(N) for t in range(2 * K)]
+    assert await read_c(dut) == M.matmul_ref(a2, b + b, N, 2 * K, N)
+
+
+@cocotb.test()
 async def test_read_element(dut):
     await reset(dut)
     random.seed(3)

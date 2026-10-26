@@ -4,9 +4,9 @@
 // tt_um_sahpar_gemm4x4 -- Tiny Tapeout top level for the 4x4 BF16
 // output-stationary systolic GEMM.
 //
-//   host bytes -> rx_byte_interface -> command_decoder -> operand_buffer A/B
-//                                            |                  |
-//                                     gemm_controller -> systolic_scheduler
+//   host bytes -> rx_byte_interface -> command_decoder -> data_prep_unit
+//                                            |            (A/B lane buffers,
+//                                     gemm_controller --start--> skewed feed)
 //                                            |                  |
 //                                      status_register   systolic_array
 //                                            |                  |
@@ -129,28 +129,6 @@ module tt_um_sahpar_gemm4x4 (
         .done_flag    (done_flag)
     );
 
-    // ---- operand buffers -----------------------------------------------
-    logic [N*K*W-1:0] a_flat;
-    logic [K*N*W-1:0] b_flat;
-
-    operand_buffer #(.NUM_ELEMS(N*K), .W(W), .AW(AW)) u_buf_a (
-        .clk     (clk),
-        .rst_n   (rst_n),
-        .wr_en   (a_wr_en),
-        .wr_addr (wr_addr),
-        .wr_data (wr_data),
-        .flat    (a_flat)
-    );
-
-    operand_buffer #(.NUM_ELEMS(K*N), .W(W), .AW(AW)) u_buf_b (
-        .clk     (clk),
-        .rst_n   (rst_n),
-        .wr_en   (b_wr_en),
-        .wr_addr (wr_addr),
-        .wr_data (wr_data),
-        .flat    (b_flat)
-    );
-
     // ---- compute -------------------------------------------------------
     logic          clear_acc, compute_enable;
     logic [CW-1:0] compute_cycle;
@@ -173,15 +151,26 @@ module tt_um_sahpar_gemm4x4 (
     logic [N-1:0]     a_west_valid, b_north_valid;
     logic [N*N*W-1:0] c_flat;
 
-    systolic_scheduler #(.N(N), .K(K), .W(W), .CW(CW)) u_sched (
-        .compute_enable (compute_enable),
-        .compute_cycle  (compute_cycle),
-        .a_flat         (a_flat),
-        .b_flat         (b_flat),
-        .a_west         (a_west),
-        .a_west_valid   (a_west_valid),
-        .b_north        (b_north),
-        .b_north_valid  (b_north_valid)
+    // Data preparation unit: K-deep lane buffers for A and B, loaded from
+    // the decoder and fed to the array edges with skew. The controller's
+    // first COMPUTE cycle is its start pulse.
+    logic feed_start, feeding, feed_done;
+    assign feed_start = compute_enable && (compute_cycle == '0);
+
+    data_prep_unit #(.N(N), .K(K), .W(W), .AW(AW)) u_prep (
+        .clk           (clk),
+        .rst_n         (rst_n),
+        .a_wr_en       (a_wr_en),
+        .b_wr_en       (b_wr_en),
+        .wr_addr       (wr_addr),
+        .wr_data       (wr_data),
+        .start         (feed_start),
+        .feeding       (feeding),
+        .feed_done     (feed_done),
+        .a_west        (a_west),
+        .a_west_valid  (a_west_valid),
+        .b_north       (b_north),
+        .b_north_valid (b_north_valid)
     );
 
     systolic_array #(.N(N), .W(W), .MUL_PIPE(MUL_PIPE)) u_array (
@@ -206,7 +195,7 @@ module tt_um_sahpar_gemm4x4 (
     assign uio_out = {2'b0, done_flag, gemm_busy, tx_host_valid, 1'b0, rx_host_ready, 1'b0};
     assign uio_oe  = 8'b0011_1010;   // [5]=DONE, [4]=BUSY, [3]=TX_VALID, [1]=RX_READY
 
-    wire _unused = &{uio_in[7:3], uio_in[1], 1'b0};
+    wire _unused = &{uio_in[7:3], uio_in[1], feeding, feed_done, 1'b0};
 
 endmodule
 

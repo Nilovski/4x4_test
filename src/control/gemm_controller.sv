@@ -8,7 +8,7 @@
 //
 //   CLEAR    1 cycle, clear_acc to every PE (skipped when accumulate = 1,
 //            so C += A x B).
-//   COMPUTE  K + N - 1 cycles; the scheduler injects skewed operands.
+//   COMPUTE  K + N - 1 cycles; the data prep unit feeds skewed operands.
 //   DRAIN    N - 1 + MAC_LATENCY cycles for the last operands to reach
 //            PE(N-1,N-1) and leave the MAC pipeline.
 //   DONE     1 cycle; done pulses, results are valid from here on.

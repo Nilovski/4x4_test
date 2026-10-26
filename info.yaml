@@ -23,12 +23,11 @@ project:
     - "interface/tx_byte_interface.sv"
     - "interface/command_decoder.sv"
     - "interface/status_register.sv"
-    - "memory/operand_buffer.sv"
+    - "prep/data_prep_unit.sv"
     - "compute/bf16_multiplier.sv"
     - "compute/bf16_adder.sv"
     - "compute/systolic_pe.sv"
     - "compute/systolic_array.sv"
-    - "compute/systolic_scheduler.sv"
     - "control/gemm_controller.sv"
     - "output/result_mux.sv"
 
