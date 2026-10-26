@@ -18,6 +18,27 @@ jobs:
         with:
           pdk: sky130A
 
+      - name: Report GDS failure
+        if: failure()
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          logs=(runs/**/*.log)
+          if [ ${#logs[@]} -eq 0 ]; then
+            mapfile -t logs < <(find . -name '*.log' -not -path '*/node_modules/*' 2>/dev/null | head -n 300)
+          fi
+          echo "found ${#logs[@]} log files"
+          {
+            echo "== error lines"
+            grep -HnE "\[ERROR|ERROR|Error:|error:|FATAL|Traceback" "${logs[@]}" 2>/dev/null | tail -n 40
+            last=$(ls -t "${logs[@]}" 2>/dev/null | head -n 1)
+            echo "== tail of $last"
+            [ -n "$last" ] && tail -n 40 "$last"
+          } > gds_failure.txt
+          cat gds_failure.txt
+          msg=$(cut -c1-300 gds_failure.txt | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')
+          echo "::error title=GDS failure details::${msg}"
+
   precheck:
     needs: gds
     runs-on: ubuntu-24.04
