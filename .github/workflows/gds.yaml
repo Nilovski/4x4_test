@@ -29,6 +29,8 @@ jobs:
           fi
           echo "found ${#logs[@]} log files"
           {
+            echo "== utilization"
+            grep -hiE "utilization|design area" "${logs[@]}" 2>/dev/null | tail -n 8
             echo "== error lines"
             grep -HnE "\[ERROR|ERROR|Error:|error:|FATAL|Traceback" "${logs[@]}" 2>/dev/null | tail -n 40
             last=$(ls -t "${logs[@]}" 2>/dev/null | head -n 1)
