@@ -31,9 +31,12 @@ HOST_UIO_OE = (1 << RX_VALID) | (1 << TX_READY)
 OP_NOP = 0x00
 OP_LOAD_A = 0x10
 OP_LOAD_B = 0x11
+OP_LOAD_A_REAL = 0x12  # BF16, 2 bytes per element, low byte first
+OP_LOAD_B_REAL = 0x13
 OP_GEMM = 0x20  # C += A x B
 OP_CLEAR_GEMM = 0x21  # C  = A x B
 OP_READ_C_ELEMENT = 0x31
+OP_READ_C_REAL = 0x32  # C as FP32, 4 little-endian bytes per element
 OP_STATUS = 0x40
 OP_ID = 0x41
 CHIP_ID = 0xA4
@@ -89,9 +92,14 @@ async def read_id(dut):
 
 async def status(dut):
     """Returns (busy, done)."""
-    await send_byte(dut, OP_STATUS)
-    s = await recv_byte(dut)
+    s = await status_byte(dut)
     return bool(s & 1), bool(s & 2)
+
+
+async def status_byte(dut):
+    """Raw STATUS: bit 0 busy, bit 1 done, bit 2 scale_mismatch."""
+    await send_byte(dut, OP_STATUS)
+    return await recv_byte(dut)
 
 
 async def wait_idle(dut, max_polls=40):
@@ -172,4 +180,100 @@ async def matmul(dut, a, b, n, k, m):
                 for col in range(N):
                     if bi + r < n and bj + col < m:
                         c[(bi + r) * m + (bj + col)] = acc[r * N + col]
+    return c
+
+
+# ---------------------------------------------------------------------------
+# real (floating-point) data: BF16 in, FP32 out
+# ---------------------------------------------------------------------------
+import struct
+
+
+def to_bf16(x):
+    """Python float -> BF16 bits (round to nearest even)."""
+    bits = struct.unpack("<I", struct.pack("<f", x))[0]
+    bits = (bits + 0x7FFF + ((bits >> 16) & 1)) & 0xFFFFFFFF
+    return bits >> 16
+
+
+def from_bf16(h):
+    return struct.unpack("<f", struct.pack("<I", (h & 0xFFFF) << 16))[0]
+
+
+def quantize(bf16_vals):
+    """Model of the data preparation unit: BF16 bits -> (int8 list, scale).
+
+    Block floating point with the matrix's largest exponent EMAX: each value
+    becomes q = sign * ({1, m} >> 1) >> (EMAX - e), truncated, and the matrix
+    is q * 2^scale with scale = EMAX - 133.
+    """
+    emax = max(((h >> 7) & 0xFF) for h in bf16_vals)
+    q = []
+    for h in bf16_vals:
+        e = (h >> 7) & 0xFF
+        d = emax - e
+        mag = 0 if (e == 0 or d > 6) else ((0x40 | ((h >> 1) & 0x3F)) >> d)
+        q.append(-mag if h & 0x8000 else mag)
+    return q, emax - 133
+
+
+def to_fp32(x):
+    """Round a Python float to FP32."""
+    return struct.unpack("<f", struct.pack("<f", x))[0]
+
+
+def gemm4_real_ref(a, b):
+    """Bit-exact model of one real-data run: float lists -> FP32 results."""
+    qa, sa = quantize([to_bf16(v) for v in a])
+    qb, sb = quantize([to_bf16(v) for v in b])
+    c = matmul_ref(qa, qb, N, K, N)
+    return [to_fp32(v * 2.0 ** (sa + sb)) for v in c]
+
+
+async def load_real_matrix(dut, opcode, values):
+    """Load N*K floats as BF16 (OP_LOAD_A_REAL / OP_LOAD_B_REAL)."""
+    await send_byte(dut, opcode)
+    for v in values:
+        h = to_bf16(v)
+        await send_byte(dut, h & 0xFF)
+        await send_byte(dut, h >> 8)
+
+
+async def read_c_real(dut):
+    """Read the N*N result block as floats (FP32 from READ_C_REAL)."""
+    out = []
+    for elem in range(N * N):
+        word = 0
+        for byte_i in range(4):
+            await send_byte(dut, OP_READ_C_REAL)
+            await send_byte(dut, elem * 4 + byte_i)
+            word |= (await recv_byte(dut)) << (8 * byte_i)
+        out.append(struct.unpack("<f", struct.pack("<I", word))[0])
+    return out
+
+
+async def gemm4_real(dut, a, b):
+    """One 4x4x4 run on real data: returns C as floats."""
+    await load_real_matrix(dut, OP_LOAD_A_REAL, a)
+    await load_real_matrix(dut, OP_LOAD_B_REAL, b)
+    await send_byte(dut, OP_CLEAR_GEMM)
+    await wait_idle(dut)
+    return await read_c_real(dut)
+
+
+async def matmul_real(dut, a, b, n, k, m):
+    """C = A x B for any n x k by k x m float matrices (row-major lists).
+
+    Each 4x4x4 block gets its own scale, so K-blocks are summed on the host
+    in floating point rather than accumulated on-chip.
+    """
+    c = [0.0] * (n * m)
+    for bi in range(0, n, N):
+        for bj in range(0, m, N):
+            for kb in range(0, k, K):
+                part = await gemm4_real(dut, _block(a, n, k, bi, kb), _block(b, k, m, kb, bj))
+                for r in range(N):
+                    for col in range(N):
+                        if bi + r < n and bj + col < m:
+                            c[(bi + r) * m + (bj + col)] += part[r * N + col]
     return c

@@ -101,6 +101,16 @@ async def test_tiled_8x8(dut):
     assert await gp.matmul(dut, a, b, 8, 8, 8) == gp.matmul_ref(a, b, 8, 8, 8)
 
 
+@cocotb.test()
+async def test_real_4x4(dut):
+    """BF16 in, FP32 out: bit-exact against the host model of the chip."""
+    await reset(dut)
+    random.seed(4)
+    a = [random.uniform(-3, 3) for _ in range(16)]
+    b = [random.uniform(-3, 3) for _ in range(16)]
+    assert await gp.gemm4_real(dut, a, b) == gp.gemm4_real_ref(a, b)
+
+
 # ---------------------------------------------------------------------------
 # demo: registered once, in its own runner scope so main() doesn't run it
 DEMO_SCOPE = PROJECT + "_demo"

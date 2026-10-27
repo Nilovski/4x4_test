@@ -14,7 +14,9 @@ PROJECT_SOURCES = \
     gemm_top.sv \
     systolic_array.sv \
     pe.sv \
-    mac_unit.sv
+    mac_unit.sv \
+    data_prep_unit.sv \
+    int_to_fp32.sv
 
 ifneq ($(GATES),yes)
 

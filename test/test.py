@@ -15,6 +15,8 @@ from gemm_protocol import (
     OP_LOAD_B, OP_NOP, OP_STATUS, RX_READY, TX_VALID,
     load_matrix, matmul as tiled_matmul, matmul_ref, read_c, recv_byte,
     send_byte, wait_idle,
+    OP_LOAD_A_REAL, OP_LOAD_B_REAL, gemm4_real, gemm4_real_ref,
+    load_real_matrix, matmul_real, read_c_real, status_byte,
 )
 
 
@@ -278,3 +280,118 @@ async def test_tiled_long_k(dut):
     A = [-128] * (4 * 64)
     B = [-128] * (64 * 4)
     assert await tiled_matmul(dut, A, B, 4, 64, 4) == matmul_ref(A, B, 4, 64, 4)
+
+
+# ---------------------------------------------------------------------------
+# real data (BF16 in, FP32 out) through the data preparation unit
+# ---------------------------------------------------------------------------
+def float_matmul(a, b, n, k, m):
+    return [sum(a[i * k + t] * b[t * m + j] for t in range(k)) for i in range(n) for j in range(m)]
+
+
+def assert_close(got, exp, tol, label=""):
+    """Every element within tol * max|exp| of the true product."""
+    ref = max(abs(v) for v in exp) or 1.0
+    worst = max(abs(g - e) for g, e in zip(got, exp)) / ref
+    assert worst <= tol, f"{label} worst relative error {worst:.4f} > {tol}\ngot={got}\nexp={exp}"
+
+
+@cocotb.test()
+async def test_real_exact(dut):
+    """Values that fit 7 significant bits at one scale come out exact."""
+    await reset(dut)
+    a = [1.5, -2.0, 0.25, 3.0, -0.5, 1.0, 2.5, -3.75, 0.0, 1.25, -1.0, 2.0, 3.5, -0.75, 0.5, 1.75]
+    b = [2.0, 0.5, -1.0, 1.5, -2.5, 3.0, 0.25, -0.5, 1.0, -1.25, 2.0, 0.75, -3.0, 1.0, -0.25, 2.5]
+    got = await gemm4_real(dut, a, b)
+    assert got == float_matmul(a, b, N, K, N)
+    assert got == gemm4_real_ref(a, b)
+
+
+@cocotb.test()
+async def test_real_random(dut):
+    """Random floats over several magnitudes: bit-exact against the model,
+    and close to the true product."""
+    await reset(dut)
+    random.seed(11)
+    for scale in (1e-3, 1.0, 37.0, 1e4):
+        for _ in range(3):
+            a = [random.uniform(-1, 1) * scale for _ in range(N * K)]
+            b = [random.uniform(-1, 1) for _ in range(K * N)]
+            got = await gemm4_real(dut, a, b)
+            assert got == gemm4_real_ref(a, b), f"model mismatch at scale {scale}"
+            assert_close(got, float_matmul(a, b, N, K, N), 0.05, f"scale {scale}")
+
+
+@cocotb.test()
+async def test_real_and_int_mixed(dut):
+    """A as real data, B as int8 buffer data (scale 0)."""
+    await reset(dut)
+    a = [0.5 * (i - 7) for i in range(N * K)]
+    b = [(3 * i) % 11 - 5 for i in range(K * N)]
+    await load_real_matrix(dut, OP_LOAD_A_REAL, a)
+    await load_matrix(dut, OP_LOAD_B, b)
+    await send_byte(dut, OP_CLEAR_GEMM)
+    await wait_idle(dut)
+    assert await read_c_real(dut) == float_matmul(a, b, N, K, N)
+    # the int8 path still reads back as integers
+    await load_matrix(dut, OP_LOAD_A, [int(2 * v) for v in a])
+    await send_byte(dut, OP_CLEAR_GEMM)
+    await wait_idle(dut)
+    assert await read_c(dut) == matmul([int(2 * v) for v in a], b)
+
+
+@cocotb.test()
+async def test_real_tiled(dut):
+    """6x5 by 5x7 float matmul tiled onto the 4x4 array."""
+    await reset(dut)
+    random.seed(12)
+    n, k, m = 6, 5, 7
+    a = [random.uniform(-4, 4) for _ in range(n * k)]
+    b = [random.uniform(-4, 4) for _ in range(k * m)]
+    got = await matmul_real(dut, a, b, n, k, m)
+    assert_close(got, float_matmul(a, b, n, k, m), 0.06, "tiled")
+
+
+@cocotb.test()
+async def test_scale_mismatch_flag(dut):
+    """GEMM (accumulate) with a different scale sets STATUS bit 2;
+    CLEAR_GEMM clears it."""
+    await reset(dut)
+    ones = [1.0] * (N * K)
+    await load_real_matrix(dut, OP_LOAD_A_REAL, ones)
+    await load_real_matrix(dut, OP_LOAD_B_REAL, ones)
+    await send_byte(dut, OP_CLEAR_GEMM)
+    await wait_idle(dut)
+    await send_byte(dut, OP_GEMM)                     # same scale: fine
+    await wait_idle(dut)
+    assert not (await status_byte(dut)) & 4
+    assert await read_c_real(dut) == [8.0] * (N * N)
+    await load_real_matrix(dut, OP_LOAD_A_REAL, [4.0] * (N * K))
+    await send_byte(dut, OP_GEMM)                     # different scale
+    await wait_idle(dut)
+    assert (await status_byte(dut)) & 4
+    await send_byte(dut, OP_CLEAR_GEMM)
+    await wait_idle(dut)
+    assert not (await status_byte(dut)) & 4
+    assert await read_c_real(dut) == [16.0] * (N * N)
+
+
+@cocotb.test()
+async def test_real_zeros_and_tiny(dut):
+    """All-zero and widely spread inputs: zeros stay zero, tiny elements
+    next to large ones flush to zero exactly as modelled."""
+    await reset(dut)
+    a = [0.0] * (N * K)
+    b = [1.0] * (K * N)
+    assert await gemm4_real(dut, a, b) == [0.0] * (N * N)
+    a = [1000.0 if i % 5 == 0 else 1e-3 for i in range(N * K)]
+    got = await gemm4_real(dut, a, b)
+    assert got == gemm4_real_ref(a, b)
+    # results below the smallest FP32 normal (2^-126) flush to zero:
+    # 2^-64 * 1.5 * 2^-63 = 1.5 * 2^-127
+    a = [2.0 ** -64 if i % 5 == 0 else 0.0 for i in range(N * K)]
+    b = [1.5 * 2.0 ** -63 if i % 5 == 0 else 0.0 for i in range(K * N)]
+    assert await gemm4_real(dut, a, b) == [0.0] * (N * N)
+    # just above it stays exact: 1.5 * 2^-126
+    b = [1.5 * 2.0 ** -62 if i % 5 == 0 else 0.0 for i in range(K * N)]
+    assert await gemm4_real(dut, a, b) == [1.5 * 2.0 ** -126 if i % 5 == 0 else 0.0 for i in range(N * N)]

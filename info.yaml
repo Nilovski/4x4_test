@@ -3,7 +3,7 @@ project:
   title:        "4x4 integer systolic GEMM"
   author:       "Sahpar Nil Ozer, Hasan Unlu"
   discord:      ""
-  description:  "4x4 int8 systolic GEMM with accumulate mode (C = A x B or C += A x B) over an 8-bit byte protocol; hosts tile any-size matmuls onto it."
+  description:  "4x4 int8 systolic GEMM with a data preparation unit: int8 or BF16 (real) operands, FP32 or int32 results, accumulate mode; hosts tile any-size matmuls onto it."
   language:     "SystemVerilog"
   clock_hz:     10000000
 
@@ -26,6 +26,8 @@ project:
     - "systolic_array.sv"
     - "pe.sv"
     - "mac_unit.sv"
+    - "data_prep_unit.sv"
+    - "int_to_fp32.sv"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 # This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
