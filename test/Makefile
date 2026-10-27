@@ -7,14 +7,14 @@ FST ?= -fst # Use more efficient FST format
 TOPLEVEL_LANG ?= verilog
 SRC_DIR = $(PWD)/../src
 PROJECT_SOURCES = \
-    tt_um_sahpar_gemm4x4.sv \
+    tt_um_apex_bf16_systolic.sv \
     interface/rx_byte_interface.sv \
     interface/tx_byte_interface.sv \
     interface/command_decoder.sv \
     interface/status_register.sv \
     prep/data_prep_unit.sv \
-    compute/bf16_multiplier.sv \
-    compute/bf16_adder.sv \
+    compute/bf16_mac_seq.sv \
+    compute/pe_row_engine.sv \
     compute/systolic_pe.sv \
     compute/systolic_array.sv \
     control/gemm_controller.sv \

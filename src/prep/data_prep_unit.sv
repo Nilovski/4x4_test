@@ -15,13 +15,15 @@
 // row-major (element e = r*K + k), B row-major (element e = k*N + c), each
 // element low byte first, so byte address 2*e is the low byte of e.
 //
-// Feeding: a one-cycle start pulse begins a feed of K + N - 1 cycles. On
-// feed cycle t, lane r presents A[r][t-r] (valid while r <= t < r + K) and
-// lane c presents B[t-c][c] (valid while c <= t < c + K). PE(i,j) then sees
-// A[i][k] and B[k][j] together on cycle k + i + j.
+// Feeding: a one-cycle start pulse begins a feed of K + N - 1 steps; from
+// the next cycle the unit presents feed index t = 0, and each step pulse
+// (one per beat) advances t. At index t, lane r presents A[r][t-r] (valid
+// while r <= t < r + K) and lane c presents B[t-c][c] (valid while
+// c <= t < c + K). PE(i,j) then holds A[i][k] and B[k][j] together in beat
+// k + i + j.
 //
 // Each lane is a rotating register: the head is the output, and the lane
-// rotates by one while it is valid. After its K valid cycles every lane is
+// rotates by one on each step while it is valid. After its K valid cycles every lane is
 // back in its original order, so the same operands can be fed again (a new
 // start, or GEMM with accumulate) without reloading.
 //
@@ -44,8 +46,9 @@ module data_prep_unit #(
 
     // feed control
     input  logic           start,       // one-cycle pulse; ignored while feeding
-    output logic           feeding,     // high for the K + N - 1 feed cycles
-    output logic           feed_done,   // one-cycle pulse on the last feed cycle
+    input  logic           step,        // advance to the next feed index
+    output logic           feeding,     // high while a feed is in progress
+    output logic           feed_done,   // high on the step that ends the feed
 
     // skewed operands to the array edges
     output logic [N*W-1:0] a_west,
@@ -62,20 +65,23 @@ module data_prep_unit #(
 
     // ---- feed counter --------------------------------------------------
     logic          running;
-    logic [TW-1:0] t_reg;
-    logic [TW-1:0] t;               // current feed cycle
+    logic [TW-1:0] t;               // current feed index
+    logic          adv;             // a step that moves the feed on
 
-    assign feeding   = start | running;
-    assign t         = running ? t_reg : '0;
-    assign feed_done = feeding && (t == TW'(FEED_CYCLES - 1));
+    assign feeding   = running;
+    assign adv       = running && step;
+    assign feed_done = adv && (t == TW'(FEED_CYCLES - 1));
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             running <= 1'b0;
-            t_reg   <= '0;
-        end else if (feeding) begin
+            t       <= '0;
+        end else if (start && !running) begin
+            running <= 1'b1;
+            t       <= '0;
+        end else if (adv) begin
             running <= !feed_done;
-            t_reg   <= feed_done ? '0 : t + TW'(1);
+            t       <= feed_done ? '0 : t + TW'(1);
         end
     end
 
@@ -84,7 +90,7 @@ module data_prep_unit #(
 
     always_comb begin
         for (int i = 0; i < N; i++) begin
-            a_active[i] = feeding && (t >= TW'(i)) && (t < TW'(i + K));
+            a_active[i] = running && (t >= TW'(i)) && (t < TW'(i + K));
             b_active[i] = a_active[i];   // same window: lane i, cycles i .. i+K-1
         end
     end
@@ -115,8 +121,8 @@ module data_prep_unit #(
                     a_lane[i][k] <= '0;
                     b_lane[i][k] <= '0;
                 end
-        end else if (feeding) begin
-            for (int i = 0; i < N; i++) begin
+        end else if (running) begin
+            if (step) for (int i = 0; i < N; i++) begin
                 if (a_active[i]) begin
                     for (int k = 0; k < K - 1; k++) a_lane[i][k] <= a_lane[i][k+1];
                     a_lane[i][K-1] <= a_lane[i][0];

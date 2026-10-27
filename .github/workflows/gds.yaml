@@ -68,6 +68,8 @@ jobs:
 
   viewer:
     needs: gds
+    # GitHub Pages only accepts deployments from the default branch
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       pages: write      # to deploy to Pages

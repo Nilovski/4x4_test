@@ -1,7 +1,7 @@
 `default_nettype none
 
 // ---------------------------------------------------------------------------
-// tt_um_sahpar_gemm4x4 -- Tiny Tapeout top level for the 4x4 BF16
+// tt_um_apex_bf16_systolic -- Tiny Tapeout top level for the 4x4 BF16
 // output-stationary systolic GEMM.
 //
 //   host bytes -> rx_byte_interface -> command_decoder -> data_prep_unit
@@ -25,7 +25,7 @@
 //                             interrupt line.
 //   uio[7:6] reserved (inputs)
 // ---------------------------------------------------------------------------
-module tt_um_sahpar_gemm4x4 (
+module tt_um_apex_bf16_systolic (
     input  logic [7:0] ui_in,
     output logic [7:0] uo_out,
     input  logic [7:0] uio_in,
@@ -36,12 +36,10 @@ module tt_um_sahpar_gemm4x4 (
     input  logic       rst_n
 );
 
-    localparam int N           = 4;
-    localparam int K           = 4;
-    localparam int W           = 16;     // BF16
-    localparam bit MUL_PIPE    = 1'b0;   // 1: register between MUL and ADD
-    localparam int MAC_LATENCY = MUL_PIPE ? 1 : 0;
-    localparam int CW          = $clog2(K + 2*(N-1) + MAC_LATENCY);
+    localparam int N    = 4;
+    localparam int K    = 4;
+    localparam int W    = 16;     // BF16
+    localparam int BEAT = 128;    // cycles per beat (row MAC engine: <= 117)
     localparam int AW          = $clog2(2 * N * K);
     localparam int IW          = $clog2(N * N);
 
@@ -85,7 +83,7 @@ module tt_um_sahpar_gemm4x4 (
     logic          error_set, status_read, done_flag;
 
     command_decoder #(
-        .N(N), .K(K), .CHIP_ID(8'hB4)
+        .N(N), .K(K), .CHIP_ID(8'hA8)
     ) u_decoder (
         .clk             (clk),
         .rst_n           (rst_n),
@@ -130,33 +128,30 @@ module tt_um_sahpar_gemm4x4 (
     );
 
     // ---- compute -------------------------------------------------------
-    logic          clear_acc, compute_enable;
-    logic [CW-1:0] compute_cycle;
+    logic clear_acc, feed_start, beat, engines_busy;
 
     gemm_controller #(
-        .N(N), .K(K), .MAC_LATENCY(MAC_LATENCY), .CW(CW)
+        .N(N), .K(K), .BEAT(BEAT)
     ) u_ctrl (
-        .clk            (clk),
-        .rst_n          (rst_n),
-        .start          (gemm_start),
-        .accumulate     (gemm_accumulate),
-        .clear_acc      (clear_acc),
-        .compute_enable (compute_enable),
-        .compute_cycle  (compute_cycle),
-        .busy           (gemm_busy),
-        .done           (gemm_done)
+        .clk          (clk),
+        .rst_n        (rst_n),
+        .start        (gemm_start),
+        .accumulate   (gemm_accumulate),
+        .engines_busy (engines_busy),
+        .clear_acc    (clear_acc),
+        .feed_start   (feed_start),
+        .beat         (beat),
+        .busy         (gemm_busy),
+        .done         (gemm_done)
     );
 
     logic [N*W-1:0]   a_west, b_north;
     logic [N-1:0]     a_west_valid, b_north_valid;
     logic [N*N*W-1:0] c_flat;
+    logic             feeding, feed_done;
 
     // Data preparation unit: K-deep lane buffers for A and B, loaded from
-    // the decoder and fed to the array edges with skew. The controller's
-    // first COMPUTE cycle is its start pulse.
-    logic feed_start, feeding, feed_done;
-    assign feed_start = compute_enable && (compute_cycle == '0);
-
+    // the decoder and fed to the array edges with skew, one step per beat.
     data_prep_unit #(.N(N), .K(K), .W(W), .AW(AW)) u_prep (
         .clk           (clk),
         .rst_n         (rst_n),
@@ -165,6 +160,7 @@ module tt_um_sahpar_gemm4x4 (
         .wr_addr       (wr_addr),
         .wr_data       (wr_data),
         .start         (feed_start),
+        .step          (beat),
         .feeding       (feeding),
         .feed_done     (feed_done),
         .a_west        (a_west),
@@ -173,15 +169,17 @@ module tt_um_sahpar_gemm4x4 (
         .b_north_valid (b_north_valid)
     );
 
-    systolic_array #(.N(N), .W(W), .MUL_PIPE(MUL_PIPE)) u_array (
+    systolic_array #(.N(N), .W(W)) u_array (
         .clk           (clk),
         .rst_n         (rst_n),
+        .beat          (beat),
         .clear_acc     (clear_acc),
         .a_west        (a_west),
         .a_west_valid  (a_west_valid),
         .b_north       (b_north),
         .b_north_valid (b_north_valid),
-        .c_flat        (c_flat)
+        .c_flat        (c_flat),
+        .engines_busy  (engines_busy)
     );
 
     result_mux #(.N(N), .W(W), .IW(IW)) u_result (

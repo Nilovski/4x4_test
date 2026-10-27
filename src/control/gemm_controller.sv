@@ -1,88 +1,96 @@
 `default_nettype none
 
 // ---------------------------------------------------------------------------
-// gemm_controller -- run sequencing for one N x N x K GEMM.
+// gemm_controller -- runs one GEMM as a sequence of beats.
 //
-//   IDLE --start--> CLEAR --> COMPUTE --> DRAIN --> DONE --> IDLE
-//              \_ accumulate _/
+//   IDLE -> CLEAR -> RUN (NUM_BEATS beats of BEAT cycles) -> DONE -> IDLE
 //
-//   CLEAR    1 cycle, clear_acc to every PE (skipped when accumulate = 1,
-//            so C += A x B).
-//   COMPUTE  K + N - 1 cycles; the data prep unit feeds skewed operands.
-//   DRAIN    N - 1 + MAC_LATENCY cycles for the last operands to reach
-//            PE(N-1,N-1) and leave the MAC pipeline.
-//   DONE     1 cycle; done pulses, results are valid from here on.
-//
-// busy is high in every state except IDLE; start is ignored while busy.
+// CLEAR zeroes the accumulators (CLEAR_GEMM only; GEMM keeps them) and starts
+// the operand feed, so the first beat sees feed index 0. On the first cycle
+// of every beat the PEs latch new operands and the feed advances; the row
+// MAC engines then work through the beat. NUM_BEATS = K + 2(N-1) covers the
+// skew in and the drain to PE(N-1,N-1).
 // ---------------------------------------------------------------------------
 module gemm_controller #(
-    parameter int N           = 4,
-    parameter int K           = 4,
-    parameter int MAC_LATENCY = 0,
-    parameter int CW          = 4
+    parameter int N    = 4,
+    parameter int K    = 4,
+    parameter int BEAT = 128      // cycles per beat; >= row engine worst case
 ) (
-    input  logic          clk,
-    input  logic          rst_n,
-
-    input  logic          start,
-    input  logic          accumulate,
-
-    output logic          clear_acc,
-    output logic          compute_enable,
-    output logic [CW-1:0] compute_cycle,
-    output logic          busy,
-    output logic          done
+    input  logic clk,
+    input  logic rst_n,
+    input  logic start,
+    input  logic accumulate,
+    input  logic engines_busy,    // simulation check only
+    output logic clear_acc,
+    output logic feed_start,
+    output logic beat,
+    output logic busy,
+    output logic done
 );
 
-    localparam int COMPUTE_CYCLES = K + N - 1;
-    localparam int DRAIN_CYCLES   = N - 1 + MAC_LATENCY;
-    localparam int LAST_CYCLE     = COMPUTE_CYCLES + DRAIN_CYCLES - 1;
+    localparam int NUM_BEATS = K + 2 * (N - 1);
+    localparam int CCW       = $clog2(BEAT);
+    localparam int BCW       = $clog2(NUM_BEATS);
 
-    typedef enum logic [2:0] {
+    typedef enum logic [1:0] {
         S_IDLE,
         S_CLEAR,
-        S_COMPUTE,
-        S_DRAIN,
+        S_RUN,
         S_DONE
     } state_t;
 
-    state_t state;
+    state_t         state;
+    logic           keep_acc;
+    logic [CCW-1:0] cc;           // cycle within the beat
+    logic [BCW-1:0] bc;           // beat number
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
-            state         <= S_IDLE;
-            compute_cycle <= '0;
+            state    <= S_IDLE;
+            keep_acc <= 1'b0;
+            cc       <= '0;
+            bc       <= '0;
         end else begin
             case (state)
-                S_IDLE: begin
-                    compute_cycle <= '0;
-                    if (start) state <= accumulate ? S_COMPUTE : S_CLEAR;
+                S_IDLE: if (start) begin
+                    keep_acc <= accumulate;
+                    state    <= S_CLEAR;
                 end
-
-                S_CLEAR: state <= S_COMPUTE;
-
-                S_COMPUTE: begin
-                    compute_cycle <= compute_cycle + CW'(1);
-                    if (compute_cycle == CW'(COMPUTE_CYCLES - 1))
-                        state <= (DRAIN_CYCLES == 0) ? S_DONE : S_DRAIN;
+                S_CLEAR: begin
+                    cc    <= '0;
+                    bc    <= '0;
+                    state <= S_RUN;
                 end
-
-                S_DRAIN: begin
-                    compute_cycle <= compute_cycle + CW'(1);
-                    if (compute_cycle == CW'(LAST_CYCLE)) state <= S_DONE;
+                S_RUN: begin
+                    if (cc == CCW'(BEAT - 1)) begin
+                        cc <= '0;
+                        if (bc == BCW'(NUM_BEATS - 1)) state <= S_DONE;
+                        else                           bc    <= bc + BCW'(1);
+                    end else begin
+                        cc <= cc + CCW'(1);
+                    end
                 end
-
-                S_DONE: state <= S_IDLE;
-
+                S_DONE:  state <= S_IDLE;
                 default: state <= S_IDLE;
             endcase
         end
     end
 
-    assign clear_acc      = (state == S_CLEAR);
-    assign compute_enable = (state == S_COMPUTE);
-    assign busy           = (state != S_IDLE);
-    assign done           = (state == S_DONE);
+    assign clear_acc  = (state == S_CLEAR) && !keep_acc;
+    assign feed_start = (state == S_CLEAR);
+    assign beat       = (state == S_RUN) && (cc == '0);
+    assign busy       = (state != S_IDLE);
+    assign done       = (state == S_DONE);
+
+`ifndef SYNTHESIS
+    // the row MAC engines must be idle when the next beat (or the end) comes
+    always_ff @(posedge clk) begin
+        if (rst_n && (beat || state == S_DONE) && engines_busy)
+            $error("gemm_controller: BEAT=%0d is too short for the MAC engines", BEAT);
+    end
+`else
+    wire _unused = &{engines_busy, 1'b0};
+`endif
 
 endmodule
 
