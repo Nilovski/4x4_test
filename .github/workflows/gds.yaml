@@ -24,6 +24,7 @@ jobs:
         if: always() && steps.build.outcome != 'success'
         shell: bash
         run: |
+          set +e +o pipefail
           shopt -s globstar nullglob
           logs=(runs/**/*.log)
           if [ ${#logs[@]} -eq 0 ]; then
@@ -42,6 +43,9 @@ jobs:
             last=$(ls -t "${logs[@]}" 2>/dev/null | head -n 1)
             echo "== tail of $last"
             [ -n "$last" ] && tail -n 40 "$last"
+            echo "== files"
+            ls -1 runs/wokwi 2>/dev/null | head -n 60
+            ls -la 2>/dev/null | head -n 30
           } > gds_failure.txt
           cat gds_failure.txt
           msg=$(cut -c1-300 gds_failure.txt | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')
